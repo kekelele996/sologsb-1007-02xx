@@ -14,10 +14,17 @@ import {
 } from "solid-js";
 import { createSeedProject, uid } from "../data";
 import { downloadText, formatTime, loadProject, parseTime, saveProject } from "../persistence";
-import type { Confidence, PersistedEnvelope, ProjectData, Segment, TranscriptTrack } from "../types";
+import type { Confidence, LexiconEntry, PersistedEnvelope, ProjectData, Segment, TranscriptTrack } from "../types";
 
 const CHANNEL_NAME = "sologsb-1007-editor";
 const TAB_ID = uid("tab");
+
+interface LexiconMatch {
+  entry: LexiconEntry;
+  term: string;
+  index: number;
+  canonical: boolean;
+}
 
 function statusText(status: "saved" | "saving" | "offline") {
   if (status === "saving") return "正在保存";
@@ -115,6 +122,11 @@ export default function OralHistoryEditor() {
   const [commentDraft, setCommentDraft] = createSignal("");
   const [replyDrafts, setReplyDrafts] = createSignal<Record<string, string>>({});
   const [trackFilter, setTrackFilter] = createSignal<"all" | "unreviewed" | "low">("all");
+  const [lexiconOpen, setLexiconOpen] = createSignal(false);
+  const [lexiconTab, setLexiconTab] = createSignal<"entries" | "adoptions">("entries");
+  const [entryDraft, setEntryDraft] = createSignal({ word: "", pinyin: "", definition: "", variants: "" });
+  const [variantDrafts, setVariantDrafts] = createSignal<Record<string, string>>({});
+  const [variantConflict, setVariantConflict] = createSignal<{ variant: string; fromId: string; toId: string } | null>(null);
   let editorRef: HTMLTextAreaElement | undefined;
   let fileInputRef: HTMLInputElement | undefined;
   let saveTimer: number | undefined;
@@ -141,6 +153,29 @@ export default function OralHistoryEditor() {
   const speakerById = (speakerId: string) =>
     project().speakers.find((speaker) => speaker.id === speakerId) ?? project().speakers[0];
   const tagById = (tagId: string) => project().tags.find((tag) => tag.id === tagId);
+
+  const lexiconTerms = createMemo(() => {
+    const terms: { entry: LexiconEntry; term: string }[] = [];
+    for (const entry of project().lexicon) {
+      terms.push({ entry, term: entry.word });
+      for (const variant of entry.variants) terms.push({ entry, term: variant });
+    }
+    return terms.filter((item) => item.term.trim()).sort((a, b) => b.term.length - a.term.length);
+  });
+
+  const findLexiconMatches = (text: string): LexiconMatch[] => {
+    const matches: LexiconMatch[] = [];
+    for (const { entry, term } of lexiconTerms()) {
+      let index = text.indexOf(term);
+      while (index !== -1) {
+        matches.push({ entry, term, index, canonical: term === entry.word });
+        index = text.indexOf(term, index + term.length);
+      }
+    }
+    // Longest term wins when several spellings start at the same offset.
+    matches.sort((a, b) => a.index - b.index || b.term.length - a.term.length);
+    return matches.filter((match, i) => i === 0 || match.index !== matches[i - 1].index);
+  };
 
   const commit = (label: string, mutate: (draft: ProjectData) => void) => {
     const current = structuredClone(project());
@@ -321,6 +356,130 @@ export default function OralHistoryEditor() {
     });
   };
 
+  const adoptMatch = (segmentId: string, hit: LexiconMatch) => {
+    commit(`采用规范词「${hit.entry.word}」`, (draft) => {
+      const track = draft.tracks.find((item) => item.segments.some((seg) => seg.id === segmentId));
+      const segment = track?.segments.find((seg) => seg.id === segmentId);
+      if (!track || !segment) return;
+      let index = hit.index;
+      if (segment.text.slice(index, index + hit.term.length) !== hit.term) {
+        index = segment.text.indexOf(hit.term);
+      }
+      if (index < 0) return;
+      const before = segment.text;
+      segment.text = `${before.slice(0, index)}${hit.entry.word}${before.slice(index + hit.term.length)}`;
+      segment.reviewed = false;
+      draft.adoptions.unshift({
+        id: uid("adopt"),
+        entryId: hit.entry.id,
+        entryWord: hit.entry.word,
+        matched: hit.term,
+        before,
+        after: segment.text,
+        trackId: track.id,
+        trackName: track.name,
+        segmentId,
+        segmentNo: track.segments.findIndex((seg) => seg.id === segmentId) + 1,
+        createdAt: new Date().toISOString(),
+      });
+      draft.adoptions = draft.adoptions.slice(0, 200);
+    });
+  };
+
+  const openLexicon = (tab: "entries" | "adoptions" = "entries") => {
+    setLexiconTab(tab);
+    setLexiconOpen(true);
+  };
+
+  const addEntry = () => {
+    const draft = entryDraft();
+    const word = draft.word.trim();
+    if (!word) return;
+    const entries = project().lexicon;
+    if (entries.some((entry) => entry.word === word)) {
+      setLastAction(`词条「${word}」已存在`);
+      return;
+    }
+    const variantOwner = entries.find((entry) => entry.variants.includes(word));
+    if (variantOwner) {
+      setLastAction(`「${word}」已是「${variantOwner.word}」的异写，不能直接建为规范词`);
+      return;
+    }
+    const variants = [...new Set(draft.variants.split(/[,，、;；\s]+/).map((item) => item.trim()).filter(Boolean))]
+      .filter((variant) => variant !== word);
+    const taken = variants.filter((variant) =>
+      entries.some((entry) => entry.word === variant || entry.variants.includes(variant)));
+    const free = variants.filter((variant) => !taken.includes(variant));
+    commit(`新增词条「${word}」`, (next) => {
+      next.lexicon.push({
+        id: uid("lex"),
+        word,
+        pinyin: draft.pinyin.trim(),
+        definition: draft.definition.trim(),
+        variants: free,
+        createdAt: new Date().toISOString(),
+      });
+    });
+    setEntryDraft({ word: "", pinyin: "", definition: "", variants: "" });
+    if (taken.length) setLastAction(`已跳过冲突异写：${taken.join("、")}，可在对应词条内确认转移`);
+  };
+
+  const removeEntry = (entryId: string) => {
+    const entry = project().lexicon.find((item) => item.id === entryId);
+    commit(`删除词条「${entry?.word ?? ""}」`, (draft) => {
+      draft.lexicon = draft.lexicon.filter((item) => item.id !== entryId);
+    });
+    const pending = variantConflict();
+    if (pending && (pending.fromId === entryId || pending.toId === entryId)) setVariantConflict(null);
+  };
+
+  const addVariant = (entryId: string) => {
+    const variant = (variantDrafts()[entryId] ?? "").trim();
+    if (!variant) return;
+    const entries = project().lexicon;
+    const target = entries.find((entry) => entry.id === entryId);
+    if (!target) return;
+    if (target.word === variant || target.variants.includes(variant)) {
+      setLastAction(`「${variant}」已在「${target.word}」词条下`);
+      return;
+    }
+    const owner = entries.find((entry) =>
+      entry.id !== entryId && (entry.word === variant || entry.variants.includes(variant)));
+    if (owner) {
+      if (owner.word === variant) {
+        setLastAction(`「${variant}」是「${owner.word}」的规范词，不能改作异写`);
+        return;
+      }
+      // The spelling already belongs to another entry: ask before moving it.
+      setVariantConflict({ variant, fromId: owner.id, toId: entryId });
+      return;
+    }
+    commit(`添加异写「${variant}」`, (draft) => {
+      draft.lexicon.find((entry) => entry.id === entryId)?.variants.push(variant);
+    });
+    setVariantDrafts((drafts) => ({ ...drafts, [entryId]: "" }));
+  };
+
+  const confirmVariantTransfer = () => {
+    const pending = variantConflict();
+    if (!pending) return;
+    commit(`转移异写「${pending.variant}」`, (draft) => {
+      const from = draft.lexicon.find((entry) => entry.id === pending.fromId);
+      const to = draft.lexicon.find((entry) => entry.id === pending.toId);
+      if (from) from.variants = from.variants.filter((variant) => variant !== pending.variant);
+      if (to && !to.variants.includes(pending.variant)) to.variants.push(pending.variant);
+    });
+    setVariantDrafts((drafts) => ({ ...drafts, [pending.toId]: "" }));
+    setVariantConflict(null);
+  };
+
+  const removeVariant = (entryId: string, variant: string) => {
+    commit(`移除异写「${variant}」`, (draft) => {
+      const entry = draft.lexicon.find((item) => item.id === entryId);
+      if (entry) entry.variants = entry.variants.filter((item) => item !== variant);
+    });
+  };
+
   const exportSrt = () => {
     const lines = activeTrack().segments.map((segment, index) => {
       const speaker = speakerById(segment.speakerId)?.name ?? "未知";
@@ -489,6 +648,7 @@ export default function OralHistoryEditor() {
           <span class={`network-chip ${online() ? "online" : "offline"}`}>{online() ? "在线" : "离线可编辑"}</span>
           <button class="icon-btn" title="撤销 Ctrl/Cmd+Z" disabled={!past().length} onClick={undo}>↶</button>
           <button class="icon-btn" title="重做 Ctrl/Cmd+Shift+Z" disabled={!future().length} onClick={redo}>↷</button>
+          <button class="btn btn-quiet" onClick={() => openLexicon()}>词条册</button>
           <button class="btn btn-quiet" onClick={() => setHelpOpen(true)}>快捷键 <kbd>?</kbd></button>
           <button class="btn btn-primary" onClick={exportSrt}>导出 SRT</button>
         </div>
@@ -532,6 +692,17 @@ export default function OralHistoryEditor() {
             />
             <button class="wide-action" onClick={() => fileInputRef?.click()}><span>＋</span> 导入带时间码文本</button>
             <div class="hint">支持 SRT / VTT / 每行 `[00:12] 文本`</div>
+          </section>
+
+          <section class="panel-section">
+            <div class="section-title"><h2>方言词条册</h2><span>{project().lexicon.length}</span></div>
+            <div class="lexicon-summary">
+              <For each={project().lexicon.slice(0, 6)}>
+                {(entry) => <span class="lex-chip" title={`${entry.pinyin} ${entry.definition}`}>{entry.word}</span>}
+              </For>
+            </div>
+            <p class="lexicon-note">正文命中规范词或异写时会在片段下方列出词条；已留存 {project().adoptions.length} 条采用记录。</p>
+            <button class="wide-action" onClick={() => openLexicon()}><span>☰</span> 管理词条与异写</button>
           </section>
 
           <section class="panel-section tag-summary">
@@ -583,6 +754,34 @@ export default function OralHistoryEditor() {
                       <Show when={segment.reviewed}><span class="pill done">✓ 已校对</span></Show>
                     </div>
                     <p>{segment.text}</p>
+                    <Show when={findLexiconMatches(segment.text).length > 0}>
+                      <div class="lexicon-hits">
+                        <For each={findLexiconMatches(segment.text)}>
+                          {(hit) => (
+                            <div class={`lexicon-hit ${hit.canonical ? "canonical" : ""}`}>
+                              <span class="hit-term">{hit.term}</span>
+                              <Show when={!hit.canonical}>
+                                <span class="hit-arrow">→</span>
+                                <b>{hit.entry.word}</b>
+                              </Show>
+                              <small>{[hit.entry.pinyin, hit.entry.definition].filter(Boolean).join(" · ") || "词条册未补充释义"}</small>
+                              <Show when={!hit.canonical}>
+                                <button
+                                  class="hit-adopt"
+                                  title={`把此处「${hit.term}」改为「${hit.entry.word}」，仅改当前这一处`}
+                                  onClick={(event) => {
+                                    event.stopPropagation();
+                                    adoptMatch(segment.id, hit);
+                                  }}
+                                >
+                                  采用
+                                </button>
+                              </Show>
+                            </div>
+                          )}
+                        </For>
+                      </div>
+                    </Show>
                     <div class="segment-tags">
                       <For each={segment.tagIds.map(tagById).filter(Boolean)}>
                         {(tag) => <span style={{ "--tag-color": tag!.color } as any}>#{tag!.label}</span>}
@@ -725,6 +924,128 @@ export default function OralHistoryEditor() {
         <span>版本 {revision() + 1} · 本地草稿</span>
         <span class="status-shortcuts">J/K 浏览　R 已校对　M 合并　? 帮助</span>
       </footer>
+
+      <Dialog open={lexiconOpen()} onOpenChange={setLexiconOpen}>
+        <Dialog.Portal>
+          <Dialog.Overlay class="dialog-overlay" />
+          <Dialog.Content class="dialog-content lexicon-dialog">
+            <Dialog.Title>方言词条册</Dialog.Title>
+            <Dialog.Description>规范词、读音、释义与常见异写会用于正文比对；所有改动随草稿自动保存。</Dialog.Description>
+            <div class="lexicon-tabs" role="tablist">
+              <button class={lexiconTab() === "entries" ? "active" : ""} onClick={() => setLexiconTab("entries")}>
+                词条 {project().lexicon.length}
+              </button>
+              <button class={lexiconTab() === "adoptions" ? "active" : ""} onClick={() => setLexiconTab("adoptions")}>
+                采用记录 {project().adoptions.length}
+              </button>
+            </div>
+
+            <Show when={lexiconTab() === "entries"}>
+              <div class="lexicon-body">
+                <Show when={variantConflict()}>
+                  {(pending) => (
+                    <div class="variant-conflict" role="alert">
+                      <span>
+                        「{pending().variant}」已归在「{project().lexicon.find((entry) => entry.id === pending().fromId)?.word}」词条下，
+                        确认转移到「{project().lexicon.find((entry) => entry.id === pending().toId)?.word}」吗？
+                      </span>
+                      <div class="actions">
+                        <button class="btn btn-quiet" onClick={() => setVariantConflict(null)}>取消</button>
+                        <button class="btn btn-danger" onClick={confirmVariantTransfer}>确认转移</button>
+                      </div>
+                    </div>
+                  )}
+                </Show>
+
+                <div class="entry-form">
+                  <input
+                    placeholder="规范词，如：起水"
+                    value={entryDraft().word}
+                    onInput={(event) => setEntryDraft((draft) => ({ ...draft, word: event.currentTarget.value }))}
+                  />
+                  <input
+                    placeholder="读音，如：qǐ shuǐ"
+                    value={entryDraft().pinyin}
+                    onInput={(event) => setEntryDraft((draft) => ({ ...draft, pinyin: event.currentTarget.value }))}
+                  />
+                  <textarea
+                    class="full"
+                    rows="2"
+                    placeholder="释义"
+                    value={entryDraft().definition}
+                    onInput={(event) => setEntryDraft((draft) => ({ ...draft, definition: event.currentTarget.value }))}
+                  />
+                  <input
+                    class="full"
+                    placeholder="常见异写，用逗号或顿号分隔（可留空）"
+                    value={entryDraft().variants}
+                    onInput={(event) => setEntryDraft((draft) => ({ ...draft, variants: event.currentTarget.value }))}
+                  />
+                  <button class="btn btn-primary full" onClick={addEntry}>＋ 添加词条</button>
+                </div>
+
+                <For each={project().lexicon} fallback={<div class="mini-empty">词条册为空，先在上方添加一个规范词。</div>}>
+                  {(entry) => (
+                    <article class="entry-card">
+                      <div class="entry-head">
+                        <b>{entry.word}</b>
+                        <span class="pinyin">{entry.pinyin || "未标注读音"}</span>
+                        <span class="spacer" />
+                        <button class="entry-delete" onClick={() => removeEntry(entry.id)}>删除词条</button>
+                      </div>
+                      <div class="entry-def">{entry.definition || "暂无释义"}</div>
+                      <div class="variant-row">
+                        <span class="variant-label">异写</span>
+                        <For each={entry.variants} fallback={<span class="variant-none">暂无</span>}>
+                          {(variant) => (
+                            <span class="variant-chip">
+                              {variant}
+                              <button title={`移除异写「${variant}」`} onClick={() => removeVariant(entry.id, variant)}>×</button>
+                            </span>
+                          )}
+                        </For>
+                      </div>
+                      <div class="variant-add">
+                        <input
+                          placeholder="补充一种写法，回车确认"
+                          value={variantDrafts()[entry.id] ?? ""}
+                          onInput={(event) => setVariantDrafts((drafts) => ({ ...drafts, [entry.id]: event.currentTarget.value }))}
+                          onKeyDown={(event) => { if (event.key === "Enter") addVariant(entry.id); }}
+                        />
+                        <button onClick={() => addVariant(entry.id)}>添加异写</button>
+                      </div>
+                    </article>
+                  )}
+                </For>
+              </div>
+            </Show>
+
+            <Show when={lexiconTab() === "adoptions"}>
+              <div class="lexicon-body">
+                <For
+                  each={project().adoptions}
+                  fallback={<div class="mini-empty">还没有采用记录。在正文片段旁点“采用”后，改前原句会留存在这里。</div>}
+                >
+                  {(record) => (
+                    <article class="adoption-card">
+                      <header>
+                        <strong>{record.entryWord}</strong>
+                        <span class="matched">← {record.matched}</span>
+                        <time>{new Date(record.createdAt).toLocaleString()}</time>
+                      </header>
+                      <div class="adoption-source">{record.trackName} · 片段 {record.segmentNo}</div>
+                      <p><b>改前</b>{record.before}</p>
+                      <p><b>改后</b>{record.after}</p>
+                    </article>
+                  )}
+                </For>
+              </div>
+            </Show>
+
+            <div class="dialog-footer"><button class="btn btn-primary" onClick={() => setLexiconOpen(false)}>完成</button></div>
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog>
 
       <Dialog open={helpOpen()} onOpenChange={setHelpOpen}>
         <Dialog.Portal>

@@ -1,4 +1,4 @@
-import type { Confidence, ProjectData, Segment, Tag } from "./types";
+import type { Confidence, LexiconEntry, ProjectData, Segment, Tag } from "./types";
 
 export const uid = (prefix = "id") =>
   `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -37,6 +37,33 @@ const segment = (
   tagIds,
   comments: [],
 });
+
+export const createSeedLexicon = (): LexiconEntry[] => [
+  {
+    id: "lex-qishui",
+    word: "起水",
+    pinyin: "qǐ shuǐ",
+    definition: "码头行话，指趁涨潮时把船上货物起卸上岸。",
+    variants: ["气水", "启水", "起水头"],
+    createdAt: new Date().toISOString(),
+  },
+  {
+    id: "lex-yongju",
+    word: "甬剧",
+    pinyin: "yǒng jù",
+    definition: "流行于宁波及周边地区的地方戏曲剧种，由滩簧发展而来。",
+    variants: ["永剧", "勇剧", "甬居"],
+    createdAt: new Date().toISOString(),
+  },
+  {
+    id: "lex-ningshaobang",
+    word: "宁绍帮",
+    pinyin: "níng shào bāng",
+    definition: "清末民初由宁波、绍兴籍船商结成的商帮，经营沿海航运。",
+    variants: ["宁邵帮", "宁绍班"],
+    createdAt: new Date().toISOString(),
+  },
+];
 
 export const createSeedProject = (): ProjectData => {
   const topics = [
@@ -93,7 +120,7 @@ export const createSeedProject = (): ProjectData => {
             16.4,
             32.9,
             "sp-lin",
-            "天没亮就有拖板车的声音，咯吱咯吱。那时大家讲“起水”，就是趁潮水把货卸下来。",
+            "天没亮就有拖板车的声音，咯吱咯吱。那时大家讲“气水”，就是趁潮水把货卸下来。",
             3,
             { dialect: true, properNoun: true },
             [byLabel("码头生活")],
@@ -188,6 +215,8 @@ export const createSeedProject = (): ProjectData => {
         ],
       },
     ],
+    lexicon: createSeedLexicon(),
+    adoptions: [],
     updatedAt: new Date().toISOString(),
   };
 };

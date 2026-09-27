@@ -1,4 +1,4 @@
-import { createSeedProject } from "./data";
+import { createSeedLexicon, createSeedProject } from "./data";
 import type { PersistedEnvelope, ProjectData } from "./types";
 
 export const STORAGE_KEY = "sologsb-1007-project-v1";
@@ -11,7 +11,11 @@ export function loadProject(): { project: ProjectData; revision: number } {
   try {
     const parsed = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "") as PersistedEnvelope;
     if (parsed?.schema === 1 && parsed.project?.tracks?.length) {
-      return { project: parsed.project, revision: parsed.revision ?? 0 };
+      const project = parsed.project;
+      // Drafts saved before the lexicon existed get the seed entries backfilled.
+      if (!Array.isArray(project.lexicon)) project.lexicon = createSeedLexicon();
+      if (!Array.isArray(project.adoptions)) project.adoptions = [];
+      return { project, revision: parsed.revision ?? 0 };
     }
   } catch {
     // A malformed local draft falls back to the bundled sample.

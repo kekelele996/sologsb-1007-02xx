@@ -47,6 +47,29 @@ export interface Segment {
   comments: ReviewComment[];
 }
 
+export interface LexiconEntry {
+  id: string;
+  word: string;
+  pinyin: string;
+  definition: string;
+  variants: string[];
+  createdAt: string;
+}
+
+export interface AdoptionRecord {
+  id: string;
+  entryId: string;
+  entryWord: string;
+  matched: string;
+  before: string;
+  after: string;
+  trackId: string;
+  trackName: string;
+  segmentId: string;
+  segmentNo: number;
+  createdAt: string;
+}
+
 export interface TranscriptTrack {
   id: string;
   name: string;
@@ -64,6 +87,8 @@ export interface ProjectData {
   speakers: Speaker[];
   tags: Tag[];
   tracks: TranscriptTrack[];
+  lexicon: LexiconEntry[];
+  adoptions: AdoptionRecord[];
   updatedAt: string;
 }
 
