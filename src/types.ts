@@ -55,6 +55,26 @@ export interface TranscriptTrack {
   segments: Segment[];
 }
 
+export interface GlossaryEntry {
+  id: string;
+  standard: string;
+  pronunciation: string;
+  definition: string;
+  variants: string[];
+}
+
+export interface AdoptionRecord {
+  id: string;
+  entryId: string;
+  trackId: string;
+  segmentId: string;
+  variant: string;
+  standard: string;
+  before: string;
+  after: string;
+  createdAt: string;
+}
+
 export interface ProjectData {
   id: string;
   title: string;
@@ -64,6 +84,8 @@ export interface ProjectData {
   speakers: Speaker[];
   tags: Tag[];
   tracks: TranscriptTrack[];
+  glossary: GlossaryEntry[];
+  adoptions: AdoptionRecord[];
   updatedAt: string;
 }
 

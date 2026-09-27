@@ -1,4 +1,4 @@
-import type { Confidence, ProjectData, Segment, Tag } from "./types";
+import type { Confidence, GlossaryEntry, ProjectData, Segment, Tag } from "./types";
 
 export const uid = (prefix = "id") =>
   `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -37,6 +37,30 @@ const segment = (
   tagIds,
   comments: [],
 });
+
+export const createSeedGlossary = (): GlossaryEntry[] => [
+  {
+    id: "entry-qishui",
+    standard: "起水",
+    pronunciation: "qǐ shuǐ（福州话近音 ki-tsui）",
+    definition: "码头行话，指趁涨潮水位升高时把货物从船上卸下。",
+    variants: ["起汐", "起潮水"],
+  },
+  {
+    id: "entry-yongju",
+    standard: "甬剧",
+    pronunciation: "yǒng jù",
+    definition: "流行于宁波、舟山一带的地方戏曲剧种，「甬」为宁波的简称。",
+    variants: ["永剧", "甬曲"],
+  },
+  {
+    id: "entry-yinong",
+    standard: "伊侬",
+    pronunciation: "yī nóng（福州话 i-nèng）",
+    definition: "福州话人称代词，相当于「他们」或「人家」。",
+    variants: ["伊农", "依侬"],
+  },
+];
 
 export const createSeedProject = (): ProjectData => {
   const topics = [
@@ -188,6 +212,8 @@ export const createSeedProject = (): ProjectData => {
         ],
       },
     ],
+    glossary: createSeedGlossary(),
+    adoptions: [],
     updatedAt: new Date().toISOString(),
   };
 };

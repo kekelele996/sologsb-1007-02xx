@@ -1,4 +1,4 @@
-import { createSeedProject } from "./data";
+import { createSeedGlossary, createSeedProject } from "./data";
 import type { PersistedEnvelope, ProjectData } from "./types";
 
 export const STORAGE_KEY = "sologsb-1007-project-v1";
@@ -11,6 +11,9 @@ export function loadProject(): { project: ProjectData; revision: number } {
   try {
     const parsed = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "") as PersistedEnvelope;
     if (parsed?.schema === 1 && parsed.project?.tracks?.length) {
+      // Drafts saved before the glossary existed get the default fields.
+      if (!Array.isArray(parsed.project.glossary)) parsed.project.glossary = createSeedGlossary();
+      if (!Array.isArray(parsed.project.adoptions)) parsed.project.adoptions = [];
       return { project: parsed.project, revision: parsed.revision ?? 0 };
     }
   } catch {

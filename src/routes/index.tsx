@@ -14,7 +14,7 @@ import {
 } from "solid-js";
 import { createSeedProject, uid } from "../data";
 import { downloadText, formatTime, loadProject, parseTime, saveProject } from "../persistence";
-import type { Confidence, PersistedEnvelope, ProjectData, Segment, TranscriptTrack } from "../types";
+import type { Confidence, GlossaryEntry, PersistedEnvelope, ProjectData, Segment, TranscriptTrack } from "../types";
 
 const CHANNEL_NAME = "sologsb-1007-editor";
 const TAB_ID = uid("tab");
@@ -115,6 +115,13 @@ export default function OralHistoryEditor() {
   const [commentDraft, setCommentDraft] = createSignal("");
   const [replyDrafts, setReplyDrafts] = createSignal<Record<string, string>>({});
   const [trackFilter, setTrackFilter] = createSignal<"all" | "unreviewed" | "low">("all");
+  const [entryDialogOpen, setEntryDialogOpen] = createSignal(false);
+  const [editingEntryId, setEditingEntryId] = createSignal<string | null>(null);
+  const [entryForm, setEntryForm] = createSignal({ standard: "", pronunciation: "", definition: "" });
+  const [formVariants, setFormVariants] = createSignal<string[]>([]);
+  const [variantDraft, setVariantDraft] = createSignal("");
+  const [variantConflict, setVariantConflict] = createSignal<{ variant: string; owner: GlossaryEntry } | null>(null);
+  const [formError, setFormError] = createSignal("");
   let editorRef: HTMLTextAreaElement | undefined;
   let fileInputRef: HTMLInputElement | undefined;
   let saveTimer: number | undefined;
@@ -141,6 +148,28 @@ export default function OralHistoryEditor() {
   const speakerById = (speakerId: string) =>
     project().speakers.find((speaker) => speaker.id === speakerId) ?? project().speakers[0];
   const tagById = (tagId: string) => project().tags.find((tag) => tag.id === tagId);
+  const trackNameById = (trackId: string) =>
+    project().tracks.find((track) => track.id === trackId)?.name ?? "已删除轨道";
+
+  interface GlossaryHit {
+    entry: GlossaryEntry;
+    matched: string;
+    isVariant: boolean;
+    count: number;
+  }
+
+  const hitsForText = (text: string): GlossaryHit[] => {
+    const hits: GlossaryHit[] = [];
+    for (const entry of project().glossary) {
+      const variant = entry.variants.find((item) => item && text.includes(item));
+      if (variant) {
+        hits.push({ entry, matched: variant, isVariant: true, count: text.split(variant).length - 1 });
+      } else if (entry.standard && text.includes(entry.standard)) {
+        hits.push({ entry, matched: entry.standard, isVariant: false, count: text.split(entry.standard).length - 1 });
+      }
+    }
+    return hits;
+  };
 
   const commit = (label: string, mutate: (draft: ProjectData) => void) => {
     const current = structuredClone(project());
@@ -319,6 +348,132 @@ export default function OralHistoryEditor() {
         : [...segment.tagIds, tagId];
       segment.reviewed = false;
     });
+  };
+
+  const adoptEntry = (segmentId: string, entry: GlossaryEntry, variant: string) => {
+    commit(`采用规范词「${entry.standard}」`, (draft) => {
+      const track = draft.tracks.find((item) => item.id === draft.activeTrackId);
+      const segment = track?.segments.find((item) => item.id === segmentId);
+      if (!segment || !segment.text.includes(variant)) return;
+      const before = segment.text;
+      segment.text = segment.text.split(variant).join(entry.standard);
+      segment.reviewed = false;
+      draft.adoptions.unshift({
+        id: uid("adopt"),
+        entryId: entry.id,
+        trackId: track?.id ?? "",
+        segmentId,
+        variant,
+        standard: entry.standard,
+        before,
+        after: segment.text,
+        createdAt: new Date().toISOString(),
+      });
+    });
+  };
+
+  const openEntryEditor = (entry: GlossaryEntry | null) => {
+    setEditingEntryId(entry?.id ?? null);
+    setEntryForm({
+      standard: entry?.standard ?? "",
+      pronunciation: entry?.pronunciation ?? "",
+      definition: entry?.definition ?? "",
+    });
+    setFormVariants(entry ? [...entry.variants] : []);
+    setVariantDraft("");
+    setVariantConflict(null);
+    setFormError("");
+    setEntryDialogOpen(true);
+  };
+
+  const variantOwner = (variant: string) =>
+    project().glossary.find((entry) =>
+      entry.id !== editingEntryId() && (entry.standard === variant || entry.variants.includes(variant)));
+
+  const tryAddVariant = () => {
+    const variant = variantDraft().trim();
+    if (!variant) return;
+    if (variant === entryForm().standard.trim()) {
+      setFormError(`异写不能与规范词「${variant}」相同`);
+      return;
+    }
+    if (formVariants().includes(variant)) {
+      setFormError(`异写「${variant}」已在当前词条下`);
+      return;
+    }
+    const owner = variantOwner(variant);
+    if (owner) {
+      if (owner.standard === variant) {
+        setFormError(`「${variant}」是词条「${owner.standard}」的规范词，不能作为异写`);
+      } else {
+        setFormError("");
+        setVariantConflict({ variant, owner });
+      }
+      return;
+    }
+    setFormVariants((list) => [...list, variant]);
+    setVariantDraft("");
+    setFormError("");
+  };
+
+  const confirmVariantTransfer = () => {
+    const pending = variantConflict();
+    if (!pending) return;
+    setFormVariants((list) => [...list, pending.variant]);
+    setVariantConflict(null);
+    setVariantDraft("");
+  };
+
+  const saveEntry = () => {
+    const form = entryForm();
+    const standard = form.standard.trim();
+    if (!standard) {
+      setFormError("请填写规范词");
+      return;
+    }
+    const clash = project().glossary.find((entry) =>
+      entry.id !== editingEntryId() && (entry.standard === standard || entry.variants.includes(standard)));
+    if (clash) {
+      setFormError(`「${standard}」已被词条「${clash.standard}」占用，请先调整该词条`);
+      return;
+    }
+    const variants = formVariants();
+    const id = editingEntryId();
+    commit(id ? `更新词条「${standard}」` : `新增词条「${standard}」`, (draft) => {
+      // Variants confirmed for transfer are detached from their previous entries here.
+      for (const entry of draft.glossary) {
+        if (entry.id === id) continue;
+        entry.variants = entry.variants.filter((item) => !variants.includes(item));
+      }
+      if (id) {
+        const entry = draft.glossary.find((item) => item.id === id);
+        if (entry) {
+          entry.standard = standard;
+          entry.pronunciation = form.pronunciation.trim();
+          entry.definition = form.definition.trim();
+          entry.variants = variants;
+        }
+      } else {
+        draft.glossary.push({
+          id: uid("entry"),
+          standard,
+          pronunciation: form.pronunciation.trim(),
+          definition: form.definition.trim(),
+          variants,
+        });
+      }
+    });
+    setEntryDialogOpen(false);
+  };
+
+  const deleteEntry = () => {
+    const id = editingEntryId();
+    const entry = project().glossary.find((item) => item.id === id);
+    if (!id || !entry) return;
+    commit(`删除词条「${entry.standard}」`, (draft) => {
+      draft.glossary = draft.glossary.filter((item) => item.id !== id);
+    });
+    setEntryDialogOpen(false);
   };
 
   const exportSrt = () => {
@@ -543,6 +698,50 @@ export default function OralHistoryEditor() {
             </div>
             <p>在右侧“标注”页把当前片段关联到主题、事件和人物。</p>
           </section>
+
+          <section class="panel-section glossary-section">
+            <div class="section-title"><h2>方言词条册</h2><span>{project().glossary.length}</span></div>
+            <div class="glossary-list">
+              <For each={project().glossary} fallback={<p class="hint">还没有词条，点击下方新增。</p>}>
+                {(entry) => (
+                  <article class="glossary-card">
+                    <div class="glossary-head">
+                      <strong>{entry.standard}</strong>
+                      <span class="reading">{entry.pronunciation || "—"}</span>
+                      <button onClick={() => openEntryEditor(entry)}>编辑</button>
+                    </div>
+                    <p class="definition">{entry.definition || "暂无释义"}</p>
+                    <div class="variant-chips">
+                      <For each={entry.variants} fallback={<span class="no-variant">暂无异写</span>}>
+                        {(variant) => <span>{variant}</span>}
+                      </For>
+                    </div>
+                  </article>
+                )}
+              </For>
+            </div>
+            <button class="wide-action" onClick={() => openEntryEditor(null)}><span>＋</span> 新增词条</button>
+            <div class="hint">正文命中异写时，可在片段旁单处采用规范词。</div>
+          </section>
+
+          <section class="panel-section">
+            <div class="section-title"><h2>采用记录</h2><span>{project().adoptions.length}</span></div>
+            <div class="adoption-list">
+              <For each={project().adoptions} fallback={<p class="hint">采用规范词后，改前原句会留存在这里。</p>}>
+                {(record) => (
+                  <article class="adoption-card">
+                    <header>
+                      <strong>「{record.variant}」→「{record.standard}」</strong>
+                      <time>{new Date(record.createdAt).toLocaleString()}</time>
+                    </header>
+                    <div class="track-name">{trackNameById(record.trackId)}</div>
+                    <p><b>改前</b>{record.before}</p>
+                    <p><b>改后</b>{record.after}</p>
+                  </article>
+                )}
+              </For>
+            </div>
+          </section>
         </aside>
 
         <main class="transcript-panel">
@@ -583,6 +782,36 @@ export default function OralHistoryEditor() {
                       <Show when={segment.reviewed}><span class="pill done">✓ 已校对</span></Show>
                     </div>
                     <p>{segment.text}</p>
+                    <Show when={hitsForText(segment.text).length > 0}>
+                      <div class="glossary-hits">
+                        <For each={hitsForText(segment.text)}>
+                          {(hit) => (
+                            <div class={`glossary-hit ${hit.isVariant ? "variant" : ""}`}>
+                              <div class="hit-info">
+                                <strong>{hit.entry.standard}</strong>
+                                <Show when={hit.entry.pronunciation}><span class="hit-reading">{hit.entry.pronunciation}</span></Show>
+                                <Show when={hit.entry.definition}><span class="hit-def">{hit.entry.definition}</span></Show>
+                                <Show when={hit.isVariant}>
+                                  <span class="hit-variant">文中写作「{hit.matched}」{hit.count > 1 ? ` ×${hit.count}` : ""}</span>
+                                </Show>
+                              </div>
+                              <Show when={hit.isVariant}>
+                                <button
+                                  class="hit-adopt"
+                                  title="仅替换当前片段中的写法，改前原句会存入采用记录"
+                                  onClick={(event) => {
+                                    event.stopPropagation();
+                                    adoptEntry(segment.id, hit.entry, hit.matched);
+                                  }}
+                                >
+                                  采用「{hit.entry.standard}」
+                                </button>
+                              </Show>
+                            </div>
+                          )}
+                        </For>
+                      </div>
+                    </Show>
                     <div class="segment-tags">
                       <For each={segment.tagIds.map(tagById).filter(Boolean)}>
                         {(tag) => <span style={{ "--tag-color": tag!.color } as any}>#{tag!.label}</span>}
@@ -743,6 +972,79 @@ export default function OralHistoryEditor() {
               <span><kbd>?</kbd> 显示本帮助</span>
             </div>
             <div class="dialog-footer"><button class="btn btn-primary" onClick={() => setHelpOpen(false)}>开始校对</button></div>
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog>
+
+      <Dialog open={entryDialogOpen()} onOpenChange={setEntryDialogOpen}>
+        <Dialog.Portal>
+          <Dialog.Overlay class="dialog-overlay" />
+          <Dialog.Content class="dialog-content">
+            <Dialog.Title>{editingEntryId() ? "编辑词条" : "新增词条"}</Dialog.Title>
+            <Dialog.Description>规范词用于统一正文写法；异写命中正文时会在片段旁提示。</Dialog.Description>
+            <div class="entry-form">
+              <label>规范词
+                <input
+                  value={entryForm().standard}
+                  placeholder="如：起水"
+                  onInput={(event) => setEntryForm((form) => ({ ...form, standard: event.currentTarget.value }))}
+                />
+              </label>
+              <label>读音
+                <input
+                  value={entryForm().pronunciation}
+                  placeholder="如：qǐ shuǐ（可附方言近音）"
+                  onInput={(event) => setEntryForm((form) => ({ ...form, pronunciation: event.currentTarget.value }))}
+                />
+              </label>
+              <label>释义
+                <textarea
+                  rows="2"
+                  value={entryForm().definition}
+                  placeholder="用一两句话说明词义与使用场景"
+                  onInput={(event) => setEntryForm((form) => ({ ...form, definition: event.currentTarget.value }))}
+                />
+              </label>
+              <div class="field-label entry-variant-label">常见异写</div>
+              <div class="form-variants">
+                <For each={formVariants()} fallback={<span class="no-variant">暂无异写</span>}>
+                  {(variant) => (
+                    <span>
+                      {variant}
+                      <button title="移除该异写" onClick={() => setFormVariants((list) => list.filter((item) => item !== variant))}>×</button>
+                    </span>
+                  )}
+                </For>
+              </div>
+              <div class="variant-edit-row">
+                <input
+                  value={variantDraft()}
+                  placeholder="输入异写后回车或点添加"
+                  onInput={(event) => setVariantDraft(event.currentTarget.value)}
+                  onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); tryAddVariant(); } }}
+                />
+                <button class="btn btn-quiet" onClick={tryAddVariant}>添加异写</button>
+              </div>
+              <Show when={variantConflict()}>
+                {(pending) => (
+                  <div class="variant-conflict" role="alert">
+                    <p>异写「{pending().variant}」目前已归在词条「{pending().owner.standard}」下。确认后将从该词条转移到当前词条，保存词条时生效。</p>
+                    <div class="conflict-actions">
+                      <button class="btn btn-quiet" onClick={() => setVariantConflict(null)}>取消</button>
+                      <button class="btn btn-danger" onClick={confirmVariantTransfer}>确认转移</button>
+                    </div>
+                  </div>
+                )}
+              </Show>
+              <Show when={formError()}><div class="form-error" role="alert">{formError()}</div></Show>
+            </div>
+            <div class="dialog-footer entry-dialog-footer">
+              <Show when={editingEntryId()}>
+                <button class="btn btn-danger" onClick={deleteEntry}>删除词条</button>
+              </Show>
+              <button class="btn btn-quiet" onClick={() => setEntryDialogOpen(false)}>取消</button>
+              <button class="btn btn-primary" onClick={saveEntry}>保存词条</button>
+            </div>
           </Dialog.Content>
         </Dialog.Portal>
       </Dialog>
